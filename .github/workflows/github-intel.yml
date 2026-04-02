@@ -1,0 +1,106 @@
+name: GitHub Intelligence
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'GitHub username or org to profile'
+        required: true
+      depth:
+        description: 'Analysis depth'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+          - quick
+          - full
+
+jobs:
+  intel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Profile Target
+        run: |
+          TARGET="${{ github.event.inputs.target }}"
+          echo "=== GitHub Intelligence Report: $TARGET ===" > intel_report.txt
+          echo "Date: $(date -u)" >> intel_report.txt
+          echo "" >> intel_report.txt
+
+          # User profile
+          echo "--- User Profile ---" >> intel_report.txt
+          gh api users/$TARGET --jq '{name, company, location, bio, public_repos, public_gists, followers, following, created_at, updated_at}' >> intel_report.txt 2>&1 || echo "Could not fetch user profile" >> intel_report.txt
+          echo "" >> intel_report.txt
+
+          # Repositories
+          echo "--- Repositories (top 20 by stars) ---" >> intel_report.txt
+          gh api "users/$TARGET/repos?sort=stars&per_page=20" --jq '.[] | "\(.name) | \(.language // "N/A") | Stars: \(.stargazers_count) | Forks: \(.forks_count) | \(.description // "")"' >> intel_report.txt 2>&1 || echo "Could not fetch repos" >> intel_report.txt
+          echo "" >> intel_report.txt
+
+          # Languages used
+          echo "--- Languages Used ---" >> intel_report.txt
+          gh api "users/$TARGET/repos?per_page=100" --jq '[.[].language // empty] | group_by(.) | map({lang: .[0], count: length}) | sort_by(-.count) | .[] | "\(.lang): \(.count) repos"' >> intel_report.txt 2>&1 || true
+          echo "" >> intel_report.txt
+
+          # Recent activity (events)
+          echo "--- Recent Activity (last 30 events) ---" >> intel_report.txt
+          gh api "users/$TARGET/events?per_page=30" --jq '.[] | "\(.created_at) | \(.type) | \(.repo.name)"' >> intel_report.txt 2>&1 || true
+          echo "" >> intel_report.txt
+
+          # Organizations
+          echo "--- Organizations ---" >> intel_report.txt
+          gh api "users/$TARGET/orgs" --jq '.[].login' >> intel_report.txt 2>&1 || true
+          echo "" >> intel_report.txt
+
+          # Followers (first 30)
+          echo "--- Top Followers ---" >> intel_report.txt
+          gh api "users/$TARGET/followers?per_page=30" --jq '.[].login' >> intel_report.txt 2>&1 || true
+          echo "" >> intel_report.txt
+
+          # Following
+          echo "--- Following ---" >> intel_report.txt
+          gh api "users/$TARGET/following?per_page=30" --jq '.[].login' >> intel_report.txt 2>&1 || true
+          echo "" >> intel_report.txt
+
+          cat intel_report.txt
+
+      - name: Commit Pattern Analysis
+        if: ${{ github.event.inputs.depth == 'full' }}
+        run: |
+          TARGET="${{ github.event.inputs.target }}"
+          echo "" >> intel_report.txt
+          echo "--- Commit Patterns ---" >> intel_report.txt
+
+          # Get top 3 repos and analyze commit patterns
+          REPOS=$(gh api "users/$TARGET/repos?sort=pushed&per_page=3" --jq '.[].full_name' 2>/dev/null)
+          for REPO in $REPOS; do
+            echo "Repo: $REPO" >> intel_report.txt
+            # Punch card (commits by hour/day)
+            gh api "repos/$REPO/stats/punch_card" --jq '.[] | select(.[2] > 0) | "Day \(.[0]) Hour \(.[1]): \(.[2]) commits"' >> intel_report.txt 2>&1 || true
+            # Recent commits
+            gh api "repos/$REPO/commits?per_page=10" --jq '.[] | "\(.commit.author.date) | \(.commit.message | split("\n")[0])"' >> intel_report.txt 2>&1 || true
+            echo "" >> intel_report.txt
+          done
+
+      - name: AI Behavioral Analysis
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
+          ollama pull phi3:mini
+
+          REPORT=$(cat intel_report.txt)
+          ollama run phi3:mini "You are an intelligence analyst. Analyze this GitHub profile data and provide: 1) Work schedule patterns (timezone, active hours) 2) Technical skills assessment 3) Professional network analysis 4) Notable patterns or anomalies 5) Overall profile summary. Data: $REPORT" > ai_behavioral.txt 2>&1
+          cat ai_behavioral.txt
+
+      - name: Save Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-intel-${{ github.event.inputs.target }}-${{ github.run_number }}
+          path: |
+            intel_report.txt
+            ai_behavioral.txt
+          retention-days: 90

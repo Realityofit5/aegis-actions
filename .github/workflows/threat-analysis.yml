@@ -1,0 +1,81 @@
+name: Threat Analysis
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target to analyze (domain, org, or description)'
+        required: true
+      analysis_type:
+        description: 'Type of analysis'
+        required: true
+        default: 'threat-model'
+        type: choice
+        options:
+          - threat-model
+          - attack-surface
+          - risk-assessment
+          - incident-response-plan
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Install Tools
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
+          ollama pull dolphin-mistral
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dnsutils whois nmap
+
+      - name: Gather Context
+        run: |
+          TARGET="${{ github.event.inputs.target }}"
+          TYPE="${{ github.event.inputs.analysis_type }}"
+
+          echo "=== $TYPE: $TARGET ===" > context.txt
+          echo "Date: $(date -u)" >> context.txt
+          echo "" >> context.txt
+
+          # Try to gather technical data if it looks like a domain
+          if echo "$TARGET" | grep -qE '\.'; then
+            echo "--- Technical Recon ---" >> context.txt
+            dig +short A $TARGET >> context.txt 2>&1 || true
+            dig +short MX $TARGET >> context.txt 2>&1 || true
+            whois $TARGET 2>/dev/null | head -30 >> context.txt || true
+            curl -sI https://$TARGET 2>/dev/null | head -20 >> context.txt || true
+            nmap -sT -p 22,80,443,3306,8080,8443 --open $TARGET >> context.txt 2>&1 || true
+            echo "" >> context.txt
+          fi
+
+      - name: Run Deep Analysis
+        run: |
+          TARGET="${{ github.event.inputs.target }}"
+          TYPE="${{ github.event.inputs.analysis_type }}"
+          CONTEXT=$(cat context.txt 2>/dev/null || echo "No technical context available")
+
+          if [ "$TYPE" = "threat-model" ]; then
+            PROMPT="You are an elite threat modeler. Create a comprehensive STRIDE threat model for: $TARGET. Include: 1) Asset identification 2) Threat actors (who would attack and why) 3) Attack vectors (how they would attack) 4) Spoofing threats 5) Tampering threats 6) Repudiation threats 7) Information disclosure threats 8) Denial of service threats 9) Elevation of privilege threats 10) Mitigation strategies for each. Technical context: $CONTEXT"
+          elif [ "$TYPE" = "attack-surface" ]; then
+            PROMPT="You are a penetration testing expert. Map the complete attack surface for: $TARGET. Include: 1) External-facing services 2) API endpoints 3) Authentication mechanisms 4) Data entry points 5) Third-party integrations 6) Network boundaries 7) Physical access points 8) Social engineering vectors 9) Supply chain dependencies 10) Priority targets ranked by impact. Technical context: $CONTEXT"
+          elif [ "$TYPE" = "risk-assessment" ]; then
+            PROMPT="You are a cybersecurity risk analyst. Perform a comprehensive risk assessment for: $TARGET. Include: 1) Critical assets inventory 2) Vulnerability assessment 3) Threat likelihood (1-5) 4) Impact analysis (1-5) 5) Risk matrix 6) Top 10 risks ranked 7) Mitigation recommendations 8) Residual risk analysis 9) Compliance gaps 10) Executive summary. Technical context: $CONTEXT"
+          else
+            PROMPT="You are an incident response specialist. Create a detailed incident response plan for: $TARGET. Include: 1) Preparation checklist 2) Detection and analysis procedures 3) Containment strategies (short-term and long-term) 4) Eradication procedures 5) Recovery steps 6) Post-incident review template 7) Communication plan (internal and external) 8) Legal and regulatory considerations 9) Evidence preservation procedures 10) Lessons learned framework. Technical context: $CONTEXT"
+          fi
+
+          ollama run dolphin-mistral "$PROMPT" > analysis.txt 2>&1
+          cat analysis.txt
+
+      - name: Save Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: threat-${{ github.event.inputs.analysis_type }}-${{ github.run_number }}
+          path: |
+            context.txt
+            analysis.txt
+          retention-days: 90

@@ -1,0 +1,76 @@
+name: Continuous Monitor
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Domain to monitor'
+        required: true
+  schedule:
+    # Every 6 hours
+    - cron: '0 */6 * * *'
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dnsutils whois
+
+      - name: Monitor Check
+        run: |
+          # Use input target or default from file
+          TARGET="${{ github.event.inputs.target }}"
+          if [ -z "$TARGET" ]; then
+            TARGET=$(cat monitor_targets.txt 2>/dev/null | head -1 || echo "example.com")
+          fi
+
+          echo "=== Monitor Report ===" > monitor_report.txt
+          echo "Target: $TARGET" >> monitor_report.txt
+          echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> monitor_report.txt
+          echo "" >> monitor_report.txt
+
+          # DNS snapshot
+          echo "--- DNS A ---" >> monitor_report.txt
+          dig +short A $TARGET >> monitor_report.txt 2>&1
+          echo "--- DNS MX ---" >> monitor_report.txt
+          dig +short MX $TARGET >> monitor_report.txt 2>&1
+          echo "--- DNS NS ---" >> monitor_report.txt
+          dig +short NS $TARGET >> monitor_report.txt 2>&1
+
+          # HTTP check
+          echo "--- HTTP Status ---" >> monitor_report.txt
+          HTTP_CODE=$(curl -sI -o /dev/null -w "%{http_code}" https://$TARGET 2>/dev/null || echo "FAIL")
+          echo "Status: $HTTP_CODE" >> monitor_report.txt
+
+          # SSL expiry
+          echo "--- SSL Expiry ---" >> monitor_report.txt
+          echo | openssl s_client -connect $TARGET:443 -servername $TARGET 2>/dev/null | openssl x509 -noout -dates 2>/dev/null >> monitor_report.txt || echo "Could not check SSL" >> monitor_report.txt
+
+          # Response time
+          echo "--- Response Time ---" >> monitor_report.txt
+          RESP_TIME=$(curl -sI -o /dev/null -w "%{time_total}" https://$TARGET 2>/dev/null || echo "TIMEOUT")
+          echo "Total: ${RESP_TIME}s" >> monitor_report.txt
+
+          # Headers snapshot
+          echo "--- Security Headers ---" >> monitor_report.txt
+          curl -sI https://$TARGET 2>/dev/null | grep -iE '(strict-transport|content-security|x-frame|x-content-type|referrer-policy|permissions-policy)' >> monitor_report.txt || true
+
+          echo "" >> monitor_report.txt
+          cat monitor_report.txt
+
+      - name: Save Snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitor-${{ github.run_number }}
+          path: monitor_report.txt
+          retention-days: 90

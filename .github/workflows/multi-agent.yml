@@ -1,0 +1,133 @@
+name: Multi-Agent Swarm
+
+on:
+  workflow_dispatch:
+    inputs:
+      mission:
+        description: 'Mission description for the agent swarm'
+        required: true
+        default: 'Comprehensive security assessment of example.com'
+
+jobs:
+  # Agent 1: OSINT Collector
+  osint-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install Tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq dnsutils whois
+      - name: OSINT Collection
+        run: |
+          MISSION="${{ github.event.inputs.mission }}"
+          # Extract domain from mission if present
+          DOMAIN=$(echo "$MISSION" | grep -oP '[\w.-]+\.\w{2,}' | head -1)
+          echo "=== OSINT Agent ===" > osint_data.txt
+          echo "Mission: $MISSION" >> osint_data.txt
+          if [ -n "$DOMAIN" ]; then
+            echo "Target domain: $DOMAIN" >> osint_data.txt
+            dig +short A $DOMAIN >> osint_data.txt 2>&1
+            dig +short MX $DOMAIN >> osint_data.txt 2>&1
+            dig +short NS $DOMAIN >> osint_data.txt 2>&1
+            dig +short TXT $DOMAIN >> osint_data.txt 2>&1
+            whois $DOMAIN 2>/dev/null | head -40 >> osint_data.txt
+            curl -sI https://$DOMAIN 2>/dev/null | head -20 >> osint_data.txt
+            curl -s "https://crt.sh/?q=%25.$DOMAIN&output=json" 2>/dev/null | python3 -c "import sys,json; [print(e.get('name_value','')) for e in json.load(sys.stdin)[:20]]" >> osint_data.txt 2>/dev/null || true
+            IP=$(dig +short A $DOMAIN | head -1)
+            [ -n "$IP" ] && curl -s "https://internetdb.shodan.io/$IP" >> osint_data.txt 2>/dev/null || true
+          fi
+          cat osint_data.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-osint
+          path: osint_data.txt
+
+  # Agent 2: Network Scanner
+  network-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install nmap
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nmap
+      - name: Network Scan
+        run: |
+          MISSION="${{ github.event.inputs.mission }}"
+          DOMAIN=$(echo "$MISSION" | grep -oP '[\w.-]+\.\w{2,}' | head -1)
+          echo "=== Network Agent ===" > network_data.txt
+          if [ -n "$DOMAIN" ]; then
+            echo "Scanning: $DOMAIN" >> network_data.txt
+            nmap -sT -sV -p 21,22,25,53,80,110,143,443,993,995,3306,3389,5432,8080,8443 --open $DOMAIN >> network_data.txt 2>&1 || echo "Scan failed" >> network_data.txt
+            echo "" >> network_data.txt
+            echo "--- SSL/TLS ---" >> network_data.txt
+            echo | openssl s_client -connect $DOMAIN:443 -servername $DOMAIN 2>/dev/null | openssl x509 -noout -subject -issuer -dates -text 2>/dev/null | head -30 >> network_data.txt || true
+          fi
+          cat network_data.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-network
+          path: network_data.txt
+
+  # Agent 3: Code Analyst
+  code-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Code Analysis
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
+          ollama pull phi3:mini
+          MISSION="${{ github.event.inputs.mission }}"
+          ollama run phi3:mini "You are a security code analyst. Based on this mission: '$MISSION' — generate: 1) Python scripts needed for this assessment 2) Key things to test 3) Tools to use 4) Expected findings. Be specific and technical." > code_analysis.txt 2>&1
+          cat code_analysis.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-code
+          path: code_analysis.txt
+
+  # Coordinator: Merges all agent results
+  coordinator:
+    needs: [osint-agent, network-agent, code-agent]
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: agent-results
+
+      - name: Install Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
+          ollama pull dolphin-mistral
+
+      - name: Merge & Analyze
+        run: |
+          echo "=== MULTI-AGENT MISSION REPORT ===" > mission_report.txt
+          echo "Mission: ${{ github.event.inputs.mission }}" >> mission_report.txt
+          echo "Date: $(date -u)" >> mission_report.txt
+          echo "Agents: 3 (OSINT, Network, Code)" >> mission_report.txt
+          echo "" >> mission_report.txt
+
+          # Collect all agent outputs
+          echo "=== RAW AGENT DATA ===" >> mission_report.txt
+          for f in agent-results/agent-*/*.txt; do
+            echo "" >> mission_report.txt
+            cat "$f" >> mission_report.txt
+          done
+
+          # AI synthesis
+          ALL_DATA=$(cat mission_report.txt | head -c 4000)
+          echo "" >> mission_report.txt
+          echo "=== AI SYNTHESIS ===" >> mission_report.txt
+          ollama run dolphin-mistral "You are the coordinator of a 3-agent security team. The OSINT agent gathered intelligence, the Network agent scanned ports and services, and the Code agent analyzed attack vectors. Synthesize all findings into: 1) Executive Summary 2) Critical Findings 3) Risk Assessment (High/Medium/Low) 4) Attack Path Analysis 5) Immediate Recommendations 6) Long-term Strategy. Agent data: $ALL_DATA" >> mission_report.txt 2>&1
+
+          cat mission_report.txt
+
+      - name: Save Final Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: mission-report-${{ github.run_number }}
+          path: mission_report.txt
+          retention-days: 90

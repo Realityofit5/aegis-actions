@@ -1,0 +1,75 @@
+name: AI Red vs Blue
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: 'Attack scenario to simulate'
+        required: true
+        default: 'Web application with user authentication and database backend'
+      rounds:
+        description: 'Number of attack/defense rounds'
+        required: true
+        default: '3'
+
+jobs:
+  red-vs-blue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Install Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
+          ollama pull dolphin-mistral
+
+      - name: Run Red vs Blue Simulation
+        run: |
+          SCENARIO="${{ github.event.inputs.scenario }}"
+          ROUNDS="${{ github.event.inputs.rounds }}"
+
+          echo "=== AI RED vs BLUE SIMULATION ===" > simulation.txt
+          echo "Scenario: $SCENARIO" >> simulation.txt
+          echo "Rounds: $ROUNDS" >> simulation.txt
+          echo "Date: $(date -u)" >> simulation.txt
+          echo "" >> simulation.txt
+
+          CONTEXT="Target system: $SCENARIO"
+
+          for i in $(seq 1 $ROUNDS); do
+            echo "========== ROUND $i ==========" >> simulation.txt
+            echo "" >> simulation.txt
+
+            # RED TEAM: Generate attack
+            echo "--- RED TEAM (Attack) ---" >> simulation.txt
+            RED_PROMPT="You are an elite offensive security expert (red team). Your target is: $CONTEXT. Generate a specific, detailed attack plan for round $i. Include: exact tools, commands, techniques, and expected outcomes. Be creative and try different attack vectors each round. Previous context for escalation."
+            RED_RESPONSE=$(ollama run dolphin-mistral "$RED_PROMPT" 2>&1)
+            echo "$RED_RESPONSE" >> simulation.txt
+            echo "" >> simulation.txt
+
+            # BLUE TEAM: Generate defense
+            echo "--- BLUE TEAM (Defense) ---" >> simulation.txt
+            BLUE_PROMPT="You are an elite defensive security expert (blue team). The red team just attempted this attack on $SCENARIO: $RED_RESPONSE. Analyze: 1) Would this attack succeed? Why/why not? 2) Detection methods 3) Specific countermeasures 4) Hardening recommendations 5) Incident response steps if the attack succeeded."
+            BLUE_RESPONSE=$(ollama run dolphin-mistral "$BLUE_PROMPT" 2>&1)
+            echo "$BLUE_RESPONSE" >> simulation.txt
+            echo "" >> simulation.txt
+
+            # Update context for next round
+            CONTEXT="$CONTEXT. Round $i: Red attempted: $(echo $RED_RESPONSE | head -c 200). Blue defended with: $(echo $BLUE_RESPONSE | head -c 200)"
+          done
+
+          # JUDGE
+          echo "========== JUDGE VERDICT ==========" >> simulation.txt
+          JUDGE_PROMPT="You are a cybersecurity judge evaluating a red vs blue exercise on: $SCENARIO. After $ROUNDS rounds, provide: 1) Overall winner (red or blue) 2) Most effective attack 3) Most effective defense 4) Gaps in both approaches 5) Final security recommendations 6) Risk rating (1-10). Be specific."
+          ollama run dolphin-mistral "$JUDGE_PROMPT" >> simulation.txt 2>&1
+
+          cat simulation.txt
+
+      - name: Save Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: red-vs-blue-${{ github.run_number }}
+          path: simulation.txt
+          retention-days: 90

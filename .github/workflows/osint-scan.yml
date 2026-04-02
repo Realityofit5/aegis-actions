@@ -1,0 +1,133 @@
+name: OSINT Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Target to scan (domain, IP, or email)'
+        required: true
+        default: 'example.com'
+
+jobs:
+  osint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install tools
+        run: |
+          pip install requests
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dnsutils whois nmap
+
+      - name: DNS Recon
+        run: |
+          TARGET="${{ github.event.inputs.target }}"
+          echo "=== DNS Recon: $TARGET ===" > osint_results.txt
+          echo "" >> osint_results.txt
+
+          echo "--- A Records ---" >> osint_results.txt
+          dig +short A $TARGET >> osint_results.txt 2>&1
+          echo "" >> osint_results.txt
+
+          echo "--- MX Records ---" >> osint_results.txt
+          dig +short MX $TARGET >> osint_results.txt 2>&1
+          echo "" >> osint_results.txt
+
+          echo "--- NS Records ---" >> osint_results.txt
+          dig +short NS $TARGET >> osint_results.txt 2>&1
+          echo "" >> osint_results.txt
+
+          echo "--- TXT Records ---" >> osint_results.txt
+          dig +short TXT $TARGET >> osint_results.txt 2>&1
+          echo "" >> osint_results.txt
+
+          echo "--- CNAME Records ---" >> osint_results.txt
+          dig +short CNAME $TARGET >> osint_results.txt 2>&1
+          echo "" >> osint_results.txt
+
+      - name: WHOIS
+        run: |
+          TARGET="${{ github.event.inputs.target }}"
+          echo "--- WHOIS ---" >> osint_results.txt
+          whois $TARGET | head -60 >> osint_results.txt 2>&1
+          echo "" >> osint_results.txt
+
+      - name: HTTP Headers
+        run: |
+          TARGET="${{ github.event.inputs.target }}"
+          echo "--- HTTP Headers ---" >> osint_results.txt
+          curl -sI https://$TARGET | head -30 >> osint_results.txt 2>&1
+          echo "" >> osint_results.txt
+
+      - name: SSL Certificate
+        run: |
+          TARGET="${{ github.event.inputs.target }}"
+          echo "--- SSL Certificate ---" >> osint_results.txt
+          echo | openssl s_client -connect $TARGET:443 -servername $TARGET 2>/dev/null | openssl x509 -noout -subject -issuer -dates >> osint_results.txt 2>&1
+          echo "" >> osint_results.txt
+
+      - name: Subdomain Enumeration (crt.sh)
+        run: |
+          TARGET="${{ github.event.inputs.target }}"
+          echo "--- Subdomains (crt.sh) ---" >> osint_results.txt
+          python3 -c "
+          import requests, json
+          try:
+              r = requests.get(f'https://crt.sh/?q=%25.{\"$TARGET\"}&output=json', timeout=15)
+              names = set()
+              for entry in r.json()[:100]:
+                  for name in entry.get('name_value','').split('\n'):
+                      name = name.strip().lower()
+                      if name and '*' not in name:
+                          names.add(name)
+              for n in sorted(names)[:30]:
+                  print(n)
+          except: print('crt.sh query failed')
+          " >> osint_results.txt 2>&1
+          echo "" >> osint_results.txt
+
+      - name: Shodan InternetDB
+        run: |
+          TARGET="${{ github.event.inputs.target }}"
+          echo "--- Shodan InternetDB ---" >> osint_results.txt
+          IP=$(dig +short A $TARGET | head -1)
+          if [ -n "$IP" ]; then
+            curl -s "https://internetdb.shodan.io/$IP" | python3 -m json.tool >> osint_results.txt 2>&1
+          else
+            echo "Could not resolve IP" >> osint_results.txt
+          fi
+          echo "" >> osint_results.txt
+
+      - name: AI Analysis
+        run: |
+          # Install Ollama for AI analysis of results
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
+          ollama pull phi3:mini
+
+          echo "--- AI Analysis ---" >> osint_results.txt
+          RESULTS=$(cat osint_results.txt)
+          ollama run phi3:mini "Analyze these OSINT results and provide: 1) Key findings 2) Potential risks 3) Recommendations. Results: $RESULTS" >> ai_analysis.txt 2>&1
+          cat ai_analysis.txt
+
+      - name: Display Results
+        run: cat osint_results.txt
+
+      - name: Save Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: osint-${{ github.event.inputs.target }}-${{ github.run_number }}
+          path: |
+            osint_results.txt
+            ai_analysis.txt
+          retention-days: 90

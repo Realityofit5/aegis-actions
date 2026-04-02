@@ -1,0 +1,78 @@
+name: Security Audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly security audit every Monday at 7 AM UTC
+    - cron: '0 7 * * 1'
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install security tools
+        run: |
+          pip install safety bandit
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nmap
+
+      - name: Python dependency audit
+        run: |
+          echo "=== Security Audit Report ===" > audit_report.txt
+          echo "Date: $(date -u)" >> audit_report.txt
+          echo "" >> audit_report.txt
+
+          echo "--- Python Vulnerability Scan ---" >> audit_report.txt
+          pip install safety
+          safety check --output text >> audit_report.txt 2>&1 || true
+          echo "" >> audit_report.txt
+
+      - name: Code security scan (if Python files exist)
+        run: |
+          echo "--- Static Code Analysis (Bandit) ---" >> audit_report.txt
+          if ls *.py 2>/dev/null; then
+            bandit -r . -f txt >> audit_report.txt 2>&1 || true
+          else
+            echo "No Python files to scan" >> audit_report.txt
+          fi
+          echo "" >> audit_report.txt
+
+      - name: Network exposure check
+        run: |
+          echo "--- Common Port Scan (localhost) ---" >> audit_report.txt
+          nmap -sT -p 22,80,443,3306,5432,6379,8080,8443,27017 localhost >> audit_report.txt 2>&1 || true
+          echo "" >> audit_report.txt
+
+      - name: AI Threat Assessment
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
+          ollama pull phi3:mini
+
+          echo "--- AI Threat Assessment ---" >> audit_report.txt
+          REPORT=$(cat audit_report.txt)
+          ollama run phi3:mini "You are a cybersecurity expert. Analyze this security audit report. Identify: 1) Critical issues 2) High-risk findings 3) Recommended immediate actions. Report: $REPORT" > ai_assessment.txt 2>&1
+          cat ai_assessment.txt
+
+      - name: Display Report
+        run: cat audit_report.txt
+
+      - name: Save Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-audit-${{ github.run_number }}
+          path: |
+            audit_report.txt
+            ai_assessment.txt
+          retention-days: 90

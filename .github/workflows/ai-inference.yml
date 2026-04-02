@@ -1,0 +1,71 @@
+name: AI Inference
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'Prompt to send to the AI model'
+        required: true
+        default: 'Analyze: what are the top 5 current cyber threats in 2026?'
+      model:
+        description: 'Ollama model to use'
+        required: true
+        default: 'phi3:mini'
+        type: choice
+        options:
+          - phi3:mini
+          - dolphin-mistral
+          - codellama:7b
+  schedule:
+    # Runs daily at 6 AM UTC (adjust to your timezone)
+    - cron: '0 6 * * *'
+
+jobs:
+  inference:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
+
+      - name: Pull model
+        run: |
+          MODEL="${{ github.event.inputs.model || 'phi3:mini' }}"
+          echo "Pulling model: $MODEL"
+          ollama pull $MODEL
+
+      - name: Run inference
+        run: |
+          MODEL="${{ github.event.inputs.model || 'phi3:mini' }}"
+          PROMPT="${{ github.event.inputs.prompt || 'Analyze: what are the top 5 current cyber threats in 2026?' }}"
+          echo "Model: $MODEL"
+          echo "Prompt: $PROMPT"
+          echo "---"
+
+          # Run inference and save result
+          ollama run $MODEL "$PROMPT" > result.txt 2>&1
+          cat result.txt
+
+          # Create structured output
+          echo "{" > result.json
+          echo "  \"model\": \"$MODEL\"," >> result.json
+          echo "  \"prompt\": \"$PROMPT\"," >> result.json
+          echo "  \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"," >> result.json
+          echo "  \"runner\": \"github-actions\"" >> result.json
+          echo "}" >> result.json
+
+      - name: Save results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-result-${{ github.run_number }}
+          path: |
+            result.txt
+            result.json
+          retention-days: 30
